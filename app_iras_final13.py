@@ -1087,6 +1087,22 @@ if 'tipo_analise' not in st.session_state:
     st.session_state['tipo_analise'] = 'Influenza'
 if 'logs' not in st.session_state:
     st.session_state['logs'] = []
+if 'audit_log' not in st.session_state:
+    st.session_state['audit_log'] = []          # rastreabilidade
+if 'cache_meta' not in st.session_state:
+    st.session_state['cache_meta'] = None       # metadados do cache (ficheiro + timestamp)
+
+def registar_acao(acao, detalhe=""):
+    """Regista uma acção no audit log da sessão."""
+    entrada = {
+        "ts":        datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+        "utilizador": st.session_state.get("usuario_nome", "—"),
+        "acao":      acao,
+        "detalhe":   detalhe,
+    }
+    st.session_state['audit_log'].insert(0, entrada)  # mais recente primeiro
+    # manter máx 100 entradas
+    st.session_state['audit_log'] = st.session_state['audit_log'][:100]
 
 # ============================================================================
 # SIDEBAR
@@ -1110,7 +1126,27 @@ st.sidebar.markdown("""
 3. 📈 Explorar gráficos epidemiológicos
 """)
 st.sidebar.markdown("---")
-st.sidebar.caption(f"v3.0 · INS · {datetime.now().strftime('%Y-%m-%d')}")
+
+# ── Indicador de cache ────────────────────────────────────────────────────
+if st.session_state['dados_processados'] is not None:
+    meta = st.session_state.get('cache_meta')
+    if meta:
+        st.sidebar.success(f"💾 Cache activo  \n{meta['ficheiro']}  \n🕐 {meta['ts']}")
+    else:
+        st.sidebar.success("💾 Dados em memória")
+
+# ── Audit log na sidebar ──────────────────────────────────────────────────
+if st.session_state['audit_log']:
+    with st.sidebar.expander("📋 Registo de actividade", expanded=False):
+        for entrada in st.session_state['audit_log'][:10]:
+            st.markdown(
+                f"**{entrada['ts']}**  \n"
+                f"👤 `{entrada['utilizador']}` — {entrada['acao']}"
+                + (f"  \n*{entrada['detalhe']}*" if entrada['detalhe'] else ""),
+                unsafe_allow_html=False)
+            st.markdown("---")
+
+st.sidebar.caption(f"v3.2 · INS · {datetime.now().strftime('%Y-%m-%d')}")
 
 # ============================================================================
 # SECÇÃO 1 — PROCESSAMENTO DE DADOS
@@ -1119,7 +1155,7 @@ st.sidebar.caption(f"v3.0 · INS · {datetime.now().strftime('%Y-%m-%d')}")
 if secao == "📊 Processamento de Dados":
     st.title("📊 Processamento de Dados SResult + Demográficos")
     st.markdown(
-        "Carregue o ficheiro **SResult** exportado do DISA Lab e a **base demográfica** "
+        "Carregue o ficheiro **SResult** exportado do LIMS e a **base demográfica** "
         "acumulada. O sistema combina os dois, padroniza os campos e gera um Excel "
         "pronto para relatório e análise.")
     st.markdown("---")
@@ -1189,8 +1225,72 @@ if secao == "📊 Processamento de Dados":
                     df_result, logs = process_rsv(sresult_file, demo_file, update_progress, selected_sheet)
 
                 progress_bar.progress(100, text="✅ Concluído!")
+
+                # ── Validação pré-armazenamento ───────────────────────────
+                anomalias = []
+
+                # 1. Códigos de sítio inválidos
+                if 'codigo_do_site' in df_result.columns:
+                    invalidos = df_result[
+                        ~df_result['codigo_do_site'].astype(str).str.upper()
+                         .str.match(r'^(IRAS|IDS)', na=False)
+                    ]
+                    if len(invalidos) > 0:
+                        anomalias.append(
+                            f"⚠️ **{len(invalidos)} registo(s)** com código de sítio inválido "
+                            f"(ex: `{invalidos['codigo_do_site'].iloc[0]}`)")
+
+                # 2. Datas de entrada em branco
+                if 'data_de_entrada' in df_result.columns:
+                    sem_entrada = df_result['data_de_entrada'].isna().sum() +                         (df_result['data_de_entrada'].astype(str).str.strip()
+                         .isin(['', 'None', 'nan'])).sum()
+                    if sem_entrada > 0:
+                        anomalias.append(f"⚠️ **{sem_entrada} registo(s)** sem data de entrada")
+
+                # 3. Resultados completamente em branco (sem qualquer teste)
+                res_cols = [c for c in ['resultado_flu','resultado_sars','resultado_rsv']
+                            if c in df_result.columns]
+                if res_cols:
+                    sem_resultado = df_result[res_cols].apply(
+                        lambda col: col.astype(str).str.strip().isin(['', 'None', 'nan', '-'])
+                    ).all(axis=1).sum()
+                    if sem_resultado > 0:
+                        anomalias.append(
+                            f"⚠️ **{sem_resultado} registo(s)** sem qualquer resultado de teste")
+
+                # 4. TRLs negativos (data de validação anterior à entrada)
+                for trl_col in ['trl_real_flu','trl_sars_cov_2','trl_real_rsv']:
+                    if trl_col in df_result.columns:
+                        trl_neg = pd.to_numeric(df_result[trl_col], errors='coerce')
+                        n_neg = int((trl_neg < 0).sum())
+                        if n_neg > 0:
+                            anomalias.append(
+                                f"⚠️ **{n_neg} TRL negativo(s)** em `{trl_col}` "
+                                f"(validação antes da entrada)")
+
+                # Mostrar anomalias
+                if anomalias:
+                    with st.expander(f"⚠️ {len(anomalias)} anomalia(s) detectada(s) — clique para ver",
+                                     expanded=True):
+                        for a in anomalias:
+                            st.markdown(a)
+                        st.caption("Os dados foram processados na mesma — verifique estes casos antes de gerar o relatório.")
+                # ─────────────────────────────────────────────────────────
+
+                # Guardar em session_state + metadados de cache
                 st.session_state['dados_processados'] = df_result
                 st.session_state['logs']              = logs
+                st.session_state['cache_meta'] = {
+                    "ficheiro":  sresult_file.name,
+                    "ts":        datetime.now().strftime("%d/%m/%Y %H:%M"),
+                    "tipo":      tipo_analise,
+                    "registos":  len(df_result),
+                }
+                # Registar no audit log
+                registar_acao(
+                    f"Processamento {tipo_analise}",
+                    f"{sresult_file.name} · {len(df_result):,} registos"
+                    + (f" · {len(anomalias)} anomalia(s)" if anomalias else ""))
 
                 with log_expander:
                     for m in logs:
@@ -1245,8 +1345,10 @@ if secao == "📊 Processamento de Dados":
         st.info(f"ℹ️ Já existem dados de **{st.session_state['tipo_analise']}** em memória "
                 f"({len(df_mem):,} registos). Pode avançar para as secções seguintes.")
         if st.button("🗑️ Limpar dados e recomeçar"):
+            registar_acao("Cache limpo", "Dados removidos da memória")
             st.session_state['dados_processados'] = None
-            st.session_state['logs'] = []
+            st.session_state['cache_meta']        = None
+            st.session_state['logs']              = []
             st.rerun()
 
 # ============================================================================
@@ -1438,6 +1540,9 @@ elif secao == "📝 Geração de Relatório":
                             periodo_actual_str, periodo_anterior_str,
                             data_emissao, nome_usuario)
                         st.success("✅ Relatório gerado com sucesso!")
+                        registar_acao(
+                            "Relatório Word gerado",
+                            f"Período: {periodo_actual_str} · {len(df_atual):,} registos")
                         fname = f"Relatorio_IRAs_{data_inicio.strftime('%Y%m%d')}_{data_fim.strftime('%Y%m%d')}.docx"
                         st.download_button(
                             "📥 Download Relatório Word", data=doc_io.getvalue(),

@@ -1119,7 +1119,7 @@ st.sidebar.caption(f"v3.0 · INS · {datetime.now().strftime('%Y-%m-%d')}")
 if secao == "📊 Processamento de Dados":
     st.title("📊 Processamento de Dados SResult + Demográficos")
     st.markdown(
-        "Carregue o ficheiro **SResult** exportado do LIMS e a **base demográfica** "
+        "Carregue o ficheiro **SResult** exportado do DISA Lab e a **base demográfica** "
         "acumulada. O sistema combina os dois, padroniza os campos e gera um Excel "
         "pronto para relatório e análise.")
     st.markdown("---")
